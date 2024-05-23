@@ -1,0 +1,362 @@
+import bpy
+import bmesh
+from bpy_extras.object_utils import AddObjectHelper
+from bpy.props import BoolProperty, FloatProperty, IntProperty
+
+from mathutils import Vector, noise
+import random
+
+from bpy.props import (
+    FloatProperty,
+    IntProperty,
+    FloatVectorProperty,
+)
+material_name = "Madera"
+# Buscar el material base en la base de datos de materiales
+base_material = bpy.data.materials.get(material_name)
+
+class OBJECT_PT_CustomPanel(bpy.types.Panel):
+    """Creates a Panel in the Object properties window"""
+    bl_label = "Grid Control Panel"
+    bl_idname = "OBJECT_PT_custom_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Tools'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator("mesh.primitive_box_add", text="Generate Default Grid").regenerate = False
+        layout.operator("mesh.primitive_box_add", text="Regenerate Grid Based on Selection").regenerate = True
+
+
+
+class OBJECT_OT_SelectTwoObjects(bpy.types.Operator):
+    """Operator for confirming the selection of two objects"""
+    bl_idname = "object.select_two_objects"
+    bl_label = "Confirm Object Selection"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        selected_objects = context.selected_objects
+        if len(selected_objects) != 2:
+            self.report({'ERROR'}, "Exactly two objects must be selected.")
+            return {'CANCELLED'}
+
+        # Storing selected object names
+        context.scene.selected_obj_1 = selected_objects[0].name
+        context.scene.selected_obj_2 = selected_objects[1].name
+
+        self.report({'INFO'}, f"Selected: {selected_objects[0].name} and {selected_objects[1].name}")
+        return {'FINISHED'}
+
+
+
+class AddBox(bpy.types.Operator, AddObjectHelper):
+    """Add a simple box mesh, apply intense Jean Arp style deformation, add holes, and perform thick extrusions"""
+    bl_idname = "mesh.primitive_box_add"
+    bl_label = "Add and Modify Boxes"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    width: FloatProperty(name="Width", description="Box Width", min=0.01, max=100.0, default=1.0)
+    height: FloatProperty(name="Height", description="Box Height", min=0.01, max=100.0, default=1.0)
+    depth: FloatProperty(name="Depth", description="Box Depth", min=0.01, max=100.0, default=1.0)
+    separation: FloatProperty(name="Separation", description="Separation between boxes", min=0.0, max=100.0, default=4)
+    grid_size: IntProperty(name="Grid Size", description="Number of boxes in one row of the grid", min=2, max=5, default=3)
+    subdivisions: IntProperty(name="Subdivisions", description="Number of subdivisions for each box", min=1, max=5, default=2)
+    deformation_scale: FloatProperty(name="Deformation Scale", description="Scale of deformation", min=0.1, max=2.0, default=1.0)
+    hole_size: FloatProperty(name="Hole Size", description="Size of holes", min=0.1, max=2.0, default=1.0)
+    num_extrusions: IntProperty(name="Number of Extrusions", description="Number of random extrusions per cube", min=1, max=20, default=5)
+    extrusion_length: FloatProperty(name="Extrusion Length", description="Length of each extrusion", min=0.3, max=1, default=0.6)
+    extrusion_scale: FloatProperty(name="Extrusion Scale", description="Scale factor for the thickness of extrusions", min=1.0, max=2.0, default=1.2)
+    
+    regenerate: BoolProperty(
+        name="Regenerate Grid",
+        description="Regenerate the grid based on selected objects' attributes",
+        default=False
+    )
+
+    
+    def execute(self, context):
+        if self.regenerate:
+            
+            selected_objects = bpy.context.selected_objects
+            bpy.ops.object.select_all(action='DESELECT')
+            
+                
+            if len(selected_objects) != 2:
+                self.report({'ERROR'}, "Exactly two objects must be selected.")
+                return {'CANCELLED'}
+            else:
+                obj1 = selected_objects[0]
+                obj2 = selected_objects[1]  
+                
+                material1 = obj1.data.materials[0]
+                material2 = obj2.data.materials[0]  
+                
+                avg_num_extrusions = (obj1["extrusions_details"]["num_extrusions"] + obj2["extrusions_details"]["num_extrusions"]) // 2
+                avg_extrusion_length = (obj1["extrusions_details"]["extrusion_length"] + obj2["extrusions_details"]["extrusion_length"]) / 2
+                avg_extrusion_scale = (obj1["extrusions_details"]["extrusion_scale"] + obj2["extrusions_details"]["extrusion_scale"]) // 2
+                average_deformation_scale = (obj1.get("deformation_scale", 1.0) + obj2.get("deformation_scale", 1.0)) / 2
+                
+                # Modificar propiedades del material para combinar los dos materiales originales
+                if obj1.material_slots and obj1.material_slots[0].material and obj2.material_slots and obj2.material_slots[0].material:
+                    material1 = obj1.material_slots[0].material
+                    material2 = obj2.material_slots[0].material
+                    
+                bpy.ops.object.select_all(action='DESELECT')
+                for obj in bpy.data.objects:
+                    if "Cube_" in obj.name:
+                        obj.select_set(True)
+                bpy.ops.object.delete()
+
+
+                for i in range(self.grid_size):
+                    for j in range(self.grid_size):
+                        location = (i * (self.width + self.separation), j * (self.depth + self.separation), 0)
+                        bpy.ops.mesh.primitive_cube_add(size=self.width, location=location)
+                        cube = context.active_object
+                        cube.name = f"Cube_{i}_{j}"               
+                        
+                        self.subdivide_cube(cube, self.subdivisions)
+
+                        # Deform the cube
+                        self.deform_cube(cube)
+                        
+                        self.apply_extrusions(cube, avg_num_extrusions, avg_extrusion_length, avg_extrusion_scale)
+                       
+                        
+                        modifier = cube.modifiers.new(name="Subsurf", type='SUBSURF')
+                        modifier.levels = 2
+                        modifier.render_levels = 2
+                    
+                        # Clonar el material base "Madera"
+                        new_material = material1.copy()
+                        
+                        if material1.use_nodes and material2.use_nodes:
+                            nodes1 = material1.node_tree.nodes
+                            nodes2 = material2.node_tree.nodes
+
+                            color_ramp_node1 = next((node for node in nodes1 if node.type == 'VALTORGB'), None)
+                            noise_texture_node1 = next((node for node in nodes1 if node.type == 'TEX_NOISE'), None)
+                            musgrave_texture_node1 = next((node for node in nodes1 if node.type == 'TEX_MUSGRAVE'), None)
+
+                            color_ramp_node2 = next((node for node in nodes2 if node.type == 'VALTORGB'), None)
+                            noise_texture_node2 = next((node for node in nodes2 if node.type == 'TEX_NOISE'), None)
+                            musgrave_texture_node2 = next((node for node in nodes2 if node.type == 'TEX_MUSGRAVE'), None)
+
+                            new_nodes = new_material.node_tree.nodes
+
+                            if color_ramp_node1 and color_ramp_node2:
+                                color_ramp_node_new = new_nodes.get('ColorRamp')
+                                if not color_ramp_node_new:
+                                    color_ramp_node_new = new_nodes.new('ShaderNodeValToRGB')
+                                    color_ramp_node_new.location = (color_ramp_node1.location.x - 200, color_ramp_node1.location.y)
+
+                                for element in color_ramp_node1.color_ramp.elements:
+                                    color2 = random.choice(color_ramp_node2.color_ramp.elements).color
+                                    element.color = (
+                                        (element.color[0] + color2[0]) / 2,
+                                        (element.color[1] + color2[1]) / 2,
+                                        (element.color[2] + color2[2]) / 2,
+                                        1
+                                    )
+                                    
+                                    new_element = color_ramp_node_new.color_ramp.elements.new(element.position)
+                                    new_element.position = element.position
+                                    new_element.color = element.color
+
+                            if noise_texture_node1 and noise_texture_node2:
+                                noise_texture_node_new = new_nodes.get('Noise Texture')
+                                if not noise_texture_node_new:
+                                    noise_texture_node_new = new_nodes.new('ShaderNodeTexNoise')
+                                    noise_texture_node_new.location = (noise_texture_node1.location.x - 200, noise_texture_node1.location.y)
+
+                                scale1 = noise_texture_node1.inputs["Scale"].default_value
+                                scale2 = noise_texture_node2.inputs["Scale"].default_value
+                                noise_texture_node1.inputs["Scale"].default_value = (scale1 + scale2) / 2
+                                
+                                noise_texture_node_new.inputs["Scale"].default_value = (scale1 + scale2) / 2
+
+                            if musgrave_texture_node1 and musgrave_texture_node2:
+                                musgrave_texture_node_new = new_nodes.get('Musgrave Texture')
+                                if not musgrave_texture_node_new:
+                                    musgrave_texture_node_new = new_nodes.new('ShaderNodeTexMusgrave')
+                                    musgrave_texture_node_new.location = (musgrave_texture_node1.location.x - 200, musgrave_texture_node1.location.y)
+
+                                scale1 = musgrave_texture_node1.inputs["Scale"].default_value
+                                scale2 = musgrave_texture_node2.inputs["Scale"].default_value
+                                musgrave_texture_node1.inputs["Scale"].default_value = (scale1 + scale2) / 2
+                                
+                                musgrave_texture_node_new.inputs["Scale"].default_value = (scale1 + scale2) / 2
+                                
+                                if cube.data.materials:
+                                    cube.data.materials[0] = new_material
+                                else:
+                                    cube.data.materials.append(new_material)                                           
+                                               
+        else:              
+                                    
+            bpy.ops.object.select_all(action='DESELECT')
+            for obj in bpy.data.objects:
+                if "Cube_" in obj.name:
+                    obj.select_set(True)
+            bpy.ops.object.delete()
+            
+            for i in range(self.grid_size):
+                for j in range(self.grid_size):
+                    location = (i * (self.width + self.separation), j * (self.depth + self.separation), 0)
+                    bpy.ops.mesh.primitive_cube_add(size=self.width, location=location)
+                    cube = context.active_object
+                    cube.name = f"Cube_{i}_{j}"               
+                    
+                    cube.scale.x = self.width / 2
+                    cube.scale.y = self.depth / 2
+                    cube.scale.z = self.height / 2
+                    # Subdivide the cube
+                    self.subdivide_cube(cube, self.subdivisions)
+
+                    # Deform the cube
+                    self.deform_cube(cube)
+                    # If not regenerating, set default or random values for the initial creation
+                    avg_num_extrusions = random.randint(1, 20)  # Example random range
+                    avg_extrusion_length = random.uniform(0.3, 1.0)
+                    avg_extrusion_scale = random.uniform(1.0, 2.0)
+                    
+                    self.apply_extrusions(cube, avg_num_extrusions, avg_extrusion_length, avg_extrusion_scale)
+                    
+                    modifier = cube.modifiers.new(name="Subsurf", type='SUBSURF')
+                    modifier.levels = 2
+                    modifier.render_levels = 2
+                    
+                    
+                    self.create_and_assign_material(cube)
+                
+               
+        return {'FINISHED'}
+        
+     
+    def apply_extrusions(self, cube, num_extrusions, extrusion_length, extrusion_scale):
+        bpy.context.view_layer.objects.active = cube
+        bpy.ops.object.select_all(action='DESELECT')
+        cube.select_set(True)
+        bpy.ops.object.mode_set(mode='EDIT')
+
+        for _ in range(num_extrusions):
+            bpy.ops.mesh.select_all(action='DESELECT')
+            bpy.ops.object.mode_set(mode='OBJECT')
+            random_face_index = random.randint(0, len(cube.data.polygons)-1)
+            cube.data.polygons[random_face_index].select = True
+            bpy.ops.object.mode_set(mode='EDIT')
+
+            normal = cube.data.polygons[random_face_index].normal
+            bpy.ops.mesh.extrude_region_move(TRANSFORM_OT_translate={"value": normal * extrusion_length})
+            bpy.ops.transform.resize(value=(extrusion_scale, extrusion_scale, extrusion_scale))
+
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+        # Optionally, store these details as custom properties if needed for future reference
+        cube["extrusions_details"] = {
+            "num_extrusions": num_extrusions,
+            "extrusion_length": extrusion_length,
+            "extrusion_scale": extrusion_scale
+        }
+
+        
+    def get_object_color(self, obj):
+        if obj.material_slots and obj.material_slots[0].material and obj.material_slots[0].material.use_nodes:
+            bsdf = obj.material_slots[0].material.node_tree.nodes.get('Principled BSDF')
+            if bsdf:
+                return bsdf.inputs['Base Color'].default_value  
+        return (1.0, 1.0, 1.0)  # Return white if no material/color is found
+    
+        
+            
+    def create_and_assign_material(self, obj):
+        # Obtener el material base "Madera"
+        base_material = bpy.data.materials.get(material_name)
+        if base_material is None:
+            self.report({'ERROR'}, f"Material '{material_name}' not found. Make sure it exists.")
+            return
+
+        # Clonar el material base para crear una variación
+        material = base_material.copy()
+        material.name = f"{material_name}_var_{obj.name}"
+
+        # Asignar el material al objeto
+        if obj.data.materials:
+            obj.data.materials[0] = material
+        else:
+            obj.data.materials.append(material)
+
+        # Modificar propiedades del material para crear variaciones
+        if material.use_nodes:
+            nodes = material.node_tree.nodes
+
+            # Asumimos que hay un nodo ColorRamp, Noise Texture y Musgrave Texture
+            for node in nodes:
+                if node.type == 'VALTORGB':
+                    # Variar el color de la rampa
+                    for element in node.color_ramp.elements:
+                        element.color = (
+                            random.uniform(0, 1),
+                            random.uniform(0, 1),
+                            random.uniform(0, 1),
+                            1
+                        )
+                elif node.type == 'TEX_NOISE':
+                    # Variar la escala de la textura de ruido
+                    node.inputs["Scale"].default_value = random.uniform(0.5, 2.0)
+                elif node.type == 'TEX_MUSGRAVE':
+                    # Variar la escala de la textura de Musgrave
+                    node.inputs["Scale"].default_value = random.uniform(0.5, 10.0)
+
+
+
+    def subdivide_cube(self, cube, subdivisions):
+        bm = bmesh.new()
+        bm.from_mesh(cube.data)
+        bmesh.ops.subdivide_edges(bm, edges=bm.edges, cuts=subdivisions, use_grid_fill=True)
+        bm.to_mesh(cube.data)
+        bm.free()
+
+    def deform_cube(self, cube):
+        bm = bmesh.new()
+        bm.from_mesh(cube.data)
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+        deformation_intensity = 0
+
+        for v in bm.verts:
+            noise_value = noise.noise(Vector((v.co.x, v.co.y, v.co.z)) * 0.5)
+            direction = Vector((random.uniform(-1, 1), random.uniform(-1, 1), random.uniform(-1, 1))).normalized()
+            v.co += direction * noise_value * self.deformation_scale
+            deformation_intensity += abs(noise_value) 
+
+        bm.to_mesh(cube.data)
+        cube.data.update()
+        bm.free()
+
+        # Store custom properties
+        cube["deformation_scale"] = self.deformation_scale
+        cube["deformation_intensity"] = deformation_intensity
+
+def menu_func(self, context):
+    self.layout.operator(AddBox.bl_idname, icon='MESH_CUBE')
+
+def register():
+    bpy.utils.register_class(AddBox)
+    bpy.utils.register_class(OBJECT_OT_SelectTwoObjects)
+    bpy.utils.register_class(OBJECT_PT_CustomPanel)
+    bpy.types.Scene.selected_obj_1 = bpy.props.StringProperty()
+    bpy.types.Scene.selected_obj_2 = bpy.props.StringProperty()
+
+def unregister():
+    bpy.utils.unregister_class(AddBox)
+    bpy.utils.unregister_class(OBJECT_OT_SelectTwoObjects)
+    bpy.utils.unregister_class(OBJECT_PT_CustomPanel)
+    del bpy.types.Scene.selected_obj_1
+    del bpy.types.Scene.selected_obj_2
+
+
+
+if __name__ == "__main__":
+    register()
